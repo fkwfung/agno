@@ -338,6 +338,37 @@ class OpenAIChat(Model):
         # Manually add the content field even if it is None
         if message.content is None:
             message_dict["content"] = ""
+        
+        # Add thought signature if present in provider_data
+        if message.provider_data and "thought_signature" in message.provider_data:
+            # For text messages, we might need to add it to extra_content or similar
+            # But OpenAI API doesn't support extra_content on messages directly usually.
+            # However, for Gemini via OpenAI compat, it might be expected in a specific way.
+            # The docs say: "extra_content": { "google": { "thought_signature": "<Signature A>" } }
+            # This usually applies to tool_calls in the response.
+            # For sending back, let's check the docs again.
+            # "Turn 1, Step 2 (User Response - Sending Tool Outputs) ... we must preserve <Signature_A>"
+            # It shows it in the tool_calls of the assistant message being sent back.
+            pass
+
+        # If this is an assistant message with tool calls, we need to check for thought signatures
+        if message.role == "assistant" and message.tool_calls:
+            # We need to reconstruct the tool calls with extra_content if thought_signature is present
+            # The message_dict["tool_calls"] is a list of dicts.
+            for i, tool_call in enumerate(message.tool_calls):
+                if "thought_signature" in tool_call:
+                    # We need to inject extra_content. 
+                    # Note: The OpenAI python client might validate this structure.
+                    # If we are just passing a dict to the API, it should be fine if the client allows extra fields.
+                    # But message_dict["tool_calls"] comes from message.tool_calls which is a list of dicts.
+                    if "extra_content" not in message_dict["tool_calls"][i]:
+                         message_dict["tool_calls"][i]["extra_content"] = {}
+                    
+                    if "google" not in message_dict["tool_calls"][i]["extra_content"]:
+                        message_dict["tool_calls"][i]["extra_content"]["google"] = {}
+                        
+                    message_dict["tool_calls"][i]["extra_content"]["google"]["thought_signature"] = tool_call["thought_signature"]
+
         return message_dict
 
     def invoke(
@@ -727,10 +758,25 @@ class OpenAIChat(Model):
                 if reasoning_content:
                     model_response.reasoning_content = reasoning_content
                     model_response.content = output_content
+        
+        # Extract thought signature from extra_content if present (for text responses)
+        if hasattr(response_message, "extra_content") and response_message.extra_content:
+            google_extra = response_message.extra_content.get("google")
+            if google_extra and "thought_signature" in google_extra:
+                if model_response.provider_data is None:
+                    model_response.provider_data = {}
+                model_response.provider_data["thought_signature"] = google_extra["thought_signature"]
+
         # Add tool calls
         if response_message.tool_calls is not None and len(response_message.tool_calls) > 0:
             try:
                 model_response.tool_calls = [t.model_dump() for t in response_message.tool_calls]
+                # Extract thought signature from tool calls if present
+                for i, tool_call in enumerate(response_message.tool_calls):
+                    if hasattr(tool_call, "extra_content") and tool_call.extra_content:
+                        google_extra = tool_call.extra_content.get("google")
+                        if google_extra and "thought_signature" in google_extra:
+                            model_response.tool_calls[i]["thought_signature"] = google_extra["thought_signature"]
             except Exception as e:
                 log_warning(f"Error processing tool calls: {e}")
 
